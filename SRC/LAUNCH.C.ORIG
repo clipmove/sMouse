@@ -1,0 +1,553 @@
+// Launch program for External Controllers
+// This External Control API should work with all "Build" type
+// 3DRealm games with little modification.
+//
+// Specific implementation detail about a controller is left
+// for the user to insert code about their particular device
+//
+// This example controller supports the mouse as its external
+// device.  This is just an example
+//
+// This program was compiled and created with Borland C/C++ 3.1, but just
+// about any 16-bit compiler can be used.
+//
+// If you have any questions on integrating your device with 3DRealms games
+// you can contact me, Mark Dochtermann at:
+//
+// 76746,3357 on CompuServe or
+// paradigm @ metronet.com
+//
+// 02/19/96 Example driver creation.
+
+// include files
+#include <conio.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <dos.h>
+#include <string.h>
+#include <process.h>
+#include <stdarg.h>
+#include <bios.h>
+#include <time.h>
+#include <float.h>
+
+#include "types.h"
+#include "external.h"
+#include "function.h"
+
+#define CONTROL_STACKSIZE    (2048)
+#define CONTROL_SAFETYMARGIN (8)
+
+typedef enum
+   {
+   axis_up,
+   axis_down,
+   axis_left,
+   axis_right
+   } axisdirection;
+
+typedef enum
+   {
+   analog_turning=0,
+   analog_strafing=1,
+   analog_lookingupanddown=2,
+   analog_elevation=3,
+   analog_rolling=4,
+   analog_moving=5,
+   analog_maxtype
+   } analogcontrol;
+
+union REGS inregs, outregs;
+struct SREGS segregs;
+
+static ExternalControlInfo control;
+static boolean control_started = false;
+void interrupt (*oldcontrolvector) (void);
+void interrupt CONTROL_ISR (void);
+static char * control_stack;
+static unsigned short control_stacksegment;
+static unsigned short control_stackpointer;
+static unsigned short old_stacksegment;
+static unsigned short old_stackpointer;
+
+#define DUKECONTROLID 0xdead
+#define MouseInt 0x33
+#define ResetMouse       0
+#define GetMouseButtons  3
+#define GetMouseDelta    11
+
+#define FIRE (1<<0)
+#define OPEN (1<<1)
+#define AIMUP (1<<2)
+#define AIMDOWN (1<<3)
+#define RUN (1<<4)
+#define INVENTORYLEFT (1<<5)
+#define INVENTORYRIGHT (1<<6)
+#define INVENTORY (1<<7)
+
+/*
+=================
+=
+= CheckParm
+=
+= Checks for the given parameter in the program's command line arguments
+=
+= Returns the argument number (1 to argc-1) or 0 if not present
+=
+=================
+*/
+
+int CheckParm (char *check)
+   {
+   char  i;
+   char  *parm;
+   char  tempstring[128];
+   char  delims[4] = {'\\','-','/',(char)NULL};
+
+   for (i = 1;i<_argc;i++)
+      {
+      strcpy(tempstring,_argv[i]);
+      parm = strtok(tempstring,&delims[0]);
+      if (parm == NULL)
+         continue;
+
+      if (!stricmp(check,parm) )
+         return i;
+      }
+   return 0;
+   }
+
+//******************************************************************************
+//
+// MOUSE_GetDelta
+//
+// Gets the amount that the mouse has moved from the mouse driver.
+//
+//******************************************************************************
+
+void MOUSE_GetDelta( int32*x, int32*y  )
+   {
+   inregs.x.ax = GetMouseDelta;
+   int86( MouseInt, &inregs, &outregs );
+
+   *x = ( int32 )((int16)outregs.x.cx);
+   *y = ( int32 )((int16)outregs.x.dx);
+   }
+
+//******************************************************************************
+//
+// MOUSE_GetButtons ()
+//
+//******************************************************************************
+
+int32 MOUSE_GetButtons( void )
+   {
+   inregs.x.ax = GetMouseButtons;
+   int86( MouseInt, &inregs, &outregs );
+
+   return( (int32)outregs.h.bl );
+   }
+
+
+//******************************************************************************
+//
+// MOUSE_Init ()
+//
+// Detects and sets up the mouse.
+//
+//******************************************************************************
+
+boolean MOUSE_Init( void )
+   {
+   inregs.x.ax = ResetMouse;
+   int86( MouseInt, &inregs, &outregs );
+
+   return( outregs.x.ax == 0xffff );
+   }
+
+//******************************************************************************
+//
+// MOUSE_Shutdown ()
+//
+// Shutsdown the mouse
+//
+//******************************************************************************
+
+void MOUSE_Shutdown( void )
+   {
+   }
+
+/*
+=================
+=
+= InitializeDevice
+=
+= This function intializes your device.
+=
+= Returns 0 upon success, any other number on failure
+=
+=================
+*/
+
+int32 InitializeDevice( void )
+   {
+   int32 i;
+   boolean status;
+
+   //
+   // Setup our mappings for the game
+   //
+
+   //
+   // We have two axes on the mouse so we only
+   // need to define two axes
+   //
+
+   control.analogaxesmap[0] = analog_turning;
+   control.analogaxesmap[1] = analog_moving;
+
+   //
+   // the mouse works best as an analog device,
+   // so we won't do any digital mappings of the
+   // axes.
+   //
+
+   //
+   // Setup our default button mappings
+   // the way the mouse is set up, we get
+   // LMB in bit 0, RMB in bit 1 and MMB in bit 2
+   //
+
+   // map single clicked buttons
+   control.buttonmap[0][0] = gamefunc_Fire;
+   control.buttonmap[1][0] = gamefunc_Strafe;
+   control.buttonmap[2][0] = gamefunc_Move_Forward;
+
+   // map double clicked buttons
+   control.buttonmap[1][1] = gamefunc_Open;
+
+   // see if our device is available
+
+   status = MOUSE_Init();
+   if (status)
+      {
+      printf("Mouse has been initialized\n");
+      return 0;
+      }
+   printf("ERROR - Mouse not found or unavailable\n");
+   return -1;
+   }
+
+/*
+=================
+=
+= ShutdownDevice
+=
+= This function shutsdown your device.
+=
+=================
+*/
+void ShutdownDevice( void )
+   {
+   MOUSE_Shutdown();
+   }
+
+/*
+=================
+=
+= GetDeviceInput
+=
+= This function querys your device and gets it's input
+=
+=================
+*/
+void GetDeviceInput( void )
+   {
+   //
+   // get movement info
+   //
+   MOUSE_GetDelta( &control.axes[0], &control.axes[1] );
+
+   // perform some rudimentary filtering
+   if (abs(control.axes[0])>abs(control.axes[1]))
+      control.axes[1]/=3;
+   else
+      control.axes[0]/=3;
+
+   // scale up our values into the game domain
+   control.axes[0]*=32;
+   control.axes[1]*=96;
+
+   //
+   // get button info
+   //
+   control.buttonstate = MOUSE_GetButtons();
+   }
+
+/*
+=============
+=
+= SetupCONTROL
+=
+=============
+*/
+
+void SetupCONTROL ( void )
+   {
+	unsigned char far *vectorptr;
+   short vector;
+   char * topofstack;
+   int i;
+
+
+	if ((i = CheckParm("-vector")) != 0)
+      {
+      vector = sscanf ("0x%x",_argv[i+1]);
+      goto gotit;
+      }
+
+ 	/* Get an interrupt vector */
+   for (vector = 0x60 ; vector <= 0x66 ; vector++)
+      {
+		vectorptr = *(unsigned char far * far *)(vector*4);
+		if ( !vectorptr || *vectorptr == 0xcf )
+			break;
+	   }
+   if (vector == 0x67)
+	   {
+      printf ("Warning: no NULL or iret interrupt vectors were found between 0x60 and 0x65\n"
+              "You can specify a vector with the -vector 0x<num> parameter.\n"
+              "Press a key to continue.\n");
+	   getch ();
+      printf ("Using default vector 0x66\n");
+      vector = 0x66;
+		}
+gotit:
+	control.intnum = vector;
+
+   // allocate the gamecontrol stack
+
+   control_stack = malloc(CONTROL_STACKSIZE);
+
+   // check to see if the malloc worked
+   if (!control_stack)
+      {
+      printf("ERROR: could not malloc stack\n");
+      }
+
+   // Calculate top of stack
+
+   topofstack = control_stack + CONTROL_STACKSIZE - CONTROL_SAFETYMARGIN;
+
+   // Determine stack segment and pointer
+
+   control_stacksegment = FP_SEG( (char huge *)topofstack );
+   control_stackpointer = FP_OFF( (char huge *)topofstack );
+
+   // hook the vector for the game
+
+	oldcontrolvector = getvect (control.intnum);
+	setvect (control.intnum, CONTROL_ISR);
+   control_started = true;
+   }
+
+
+/*
+=============
+=
+= ShutdownCONTROL
+=
+=============
+*/
+
+void ShutdownCONTROL ( void )
+   {
+	if (control_started)
+      {
+      control_started = false;
+		setvect (control.intnum,oldcontrolvector);
+      free ( control_stack );
+      }
+   }
+
+/*
+=============
+=
+= CONTROL_ISR
+=
+=============
+*/
+
+#define GetStack(a,b) \
+   {                  \
+   *a = _SS;          \
+   *b = _SP;          \
+   }
+#define SetStack(a,b) \
+   {                  \
+   _SS=a;             \
+   _SP=b;             \
+   }
+
+void interrupt CONTROL_ISR (void)
+	{
+   //
+   // Get current stack
+   //
+
+   GetStack( &old_stacksegment, &old_stackpointer );
+
+   //
+   // Set the local stack
+   //
+
+   SetStack( control_stacksegment, control_stackpointer );
+
+   if (control.command == EXTERNAL_GetInput)
+      {
+      GetDeviceInput();
+      }
+
+   //
+   // Restore the old stack
+   //
+
+   SetStack( old_stacksegment, old_stackpointer );
+   }
+
+/*
+=============
+=
+= LaunchGAME
+=
+=============
+*/
+
+void LaunchGAME ( int pause )
+{
+	char	*newargs[39];
+   char  *launchname;
+	char	adrstring[10];
+	long  	flatadr;
+	int argnum = 1;
+	int i,j;
+
+	i = CheckParm("launch");
+	if (i != 0)
+      {
+      i++;
+      launchname = _argv[i];
+      i++;
+      }
+   else
+      {
+      printf("No program to launch\n");
+      return;
+      }
+
+	SetupCONTROL ();
+
+   //
+   // if we did not successfully set up our interrupt get out of here
+   //
+   if (!control_started)
+      return;
+
+   // build the argument list for the game
+   // adding all previous command lines to be passed to the main game
+
+   // i initialized from above
+   for (;i<_argc;i++)
+      {
+      newargs [argnum++] = _argv[i];
+      }
+
+	newargs [argnum++] = "-" EXTERNALPARM;
+
+	/* Add address of gamecontrol structure */
+
+	flatadr = (long)_DS*16 + (unsigned)&control;
+	sprintf (adrstring,"%lu",flatadr);
+	newargs [argnum++] = adrstring;
+
+	newargs [argnum] = NULL;
+
+// Make sure arg 0 is correct, if we want to dump the arguments
+
+	newargs [0] = launchname;
+
+   if (pause==1)
+      {
+      for (i = 0; i < argnum; i++)
+         printf ("  arg %d = %s\n", i, newargs [i]);
+
+      printf ("\nPress ESC to abort, or any other key to continue...");
+      if (getch () == 0x1b)
+         {
+         printf ("\n\n");
+         ShutdownCONTROL();
+         return;
+         }
+      }
+   if (spawnvp ( P_WAIT, launchname, newargs) != 0)
+      {
+      if (errno!=0)
+         printf("%s\n%d\n",strerror(errno),errno);
+      }
+	printf ("\nReturned from %s\n\n",launchname);
+
+   ShutdownCONTROL();
+	}
+
+/*
+=============
+=
+= main
+=
+=============
+*/
+
+void main( void )
+   {
+   int32 i;
+
+   // welcome the user
+   printf ("External Launch for 3DRealms games.\n");
+   printf ("Duke Nukem 3D implementation.\n");
+   printf ("Written by Mark Dochtermann.\n");
+   printf ("Version 1.0\n");
+
+   // clear out control structure
+   memset(&control,0,sizeof(control));
+
+   control.id=DUKECONTROLID;
+
+   //
+   // clear all assigments
+   //
+
+   // clear all button mappings
+   for (i=0;i<MAXEXTERNALBUTTONS;i++)
+      {
+      control.buttonmap[i][0] = EXTERNALBUTTONUNDEFINED;
+      control.buttonmap[i][1] = EXTERNALBUTTONUNDEFINED;
+      }
+
+   // clear all axis mappings
+   for (i=0;i<MAXEXTERNALAXES;i++)
+      {
+      control.analogaxesmap[i] = EXTERNALAXISUNDEFINED;
+      control.digitalaxesmap[i][0] = EXTERNALAXISUNDEFINED;
+      control.digitalaxesmap[i][1] = EXTERNALAXISUNDEFINED;
+      }
+
+   // try to initialize the device
+   if (InitializeDevice())
+      {
+      exit(0);
+      }
+   // launch the game
+   LaunchGAME ( 1 );
+   // we are back from the game, so clean up and exit
+   ShutdownDevice();
+   }
