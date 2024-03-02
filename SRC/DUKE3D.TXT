@@ -1,0 +1,43 @@
+======================================================
+=                                                    =
+= Controlling Duke Nukem 3D with an External Device  =
+= Version 1.0                                        =
+= February 19, 1996                                  =
+= Written by Mark Dochtermann                        =
+=                                                    =
+======================================================
+
+
+Duke Nukem 3D supports only 3 analog degrees of freedom, these are:
+
+  analog_turning (yaw)
+  analog_moving (translation in z)
+  analog_strafing (translation in x)
+
+All other control must be accomplished through the button states.
+
+There are 2048 units in 360 degrees in DN3D.
+
+1 DN3D unit corresponds to 32 control units.
+DN3D limits your maximum change in yaw per frame to 127 units.
+This put's an effective maximum on analog_turning of +/- 4064 control
+units.  The normal keyboard turning speed in DN3D is 30 DN3D units and 60
+DN3D units while holding down the "run" button.
+
+1 DN3D analog_moving unit corresponds to 64 control units.
+DN3D limits your maximum change in z per frame to 90 units.
+This put's an effective maximum on analog_moving of +/- 5760 control
+units.  The normal keyboard move speed in DN3D is 40 DN3D units (2560
+control units) and 80 DN3D units (5120 control units) while holding down
+the "run" button.
+
+1 DN3D analog_strafing unit corresponds to 1 control unit.
+DN3D limits your maximum change in x per frame to 90 units.
+This put's an effective maximum on analog_strafing of +/- 90 control
+units.  The normal keyboard strafe speed in DN3D is 40 DN3D units (40
+control units) and 80 DN3D units (80 control units) while holding down the
+"run" button.
+
+When "Mouse Aiming" is active in DN3D all analog_moving information will
+be intercepted by DN3D and used to control the pitch of the character.
+
